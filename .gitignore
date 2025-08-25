@@ -1,0 +1,15 @@
+﻿# Maven
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+# IDEs
+*.iml
+.idea/
+.project
+.classpath
+.settings/
+.eclipse/
+
+# OS
+.DS_Store
+Thumbs.db
