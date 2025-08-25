@@ -13,12 +13,13 @@ pipeline {
 
   parameters {
     booleanParam(name: 'DEPLOY', defaultValue: false, description: 'Desplegar a Staging y hacer health check')
-    string(name: 'STAGING_HOST', defaultValue: 'REEMPLAZA-CON-IP-O-DNS', description: 'Host/IP del Staging')
+    string(name: 'STAGING_HOST', defaultValue: 'host.docker.internal', description: 'Host/IP del Staging')
     string(name: 'STAGING_USER', defaultValue: 'staging', description: 'Usuario SSH en Staging')
+    string(name: 'STAGING_PORT', defaultValue: '2222', description: 'Puerto SSH del Staging')
   }
 
   environment {
-    SSH_CRED_ID  = 'staging-ssh'    // Credencial SSH en Jenkins
+    SSH_CRED_ID  = 'staging-ssh'    // Credencial SSH en Jenkins (clave privada)
     STAGING_DIR  = '/opt/springapp'
     SERVICE_NAME = 'springapp'
     HEALTH_PATH  = '/health'
@@ -27,7 +28,7 @@ pipeline {
   stages {
     stage('Checkout') {
       steps {
-        checkout scm   // porque el job será "Pipeline from SCM"
+        checkout scm   // porque el job es "Pipeline from SCM"
       }
     }
 
@@ -51,7 +52,6 @@ pipeline {
     stage('Coverage (JaCoCo)') {
       steps {
         // 'verify' ejecuta jacoco:check con las reglas del POM
-        // (añadimos -DskipTests para no volver a correr tests)
         sh 'mvn -B -DskipTests verify'
       }
     }
@@ -74,14 +74,23 @@ pipeline {
           sh '''
             set -euxo pipefail
             JAR=$(ls target/*.jar | head -n 1)
-            ssh -o StrictHostKeyChecking=no ${STAGING_USER}@${STAGING_HOST} "mkdir -p ${STAGING_DIR}"
-            scp -o StrictHostKeyChecking=no "$JAR" ${STAGING_USER}@${STAGING_HOST}:${STAGING_DIR}/${SERVICE_NAME}.jar
 
-            # reinicia servicio si existe; si no, levanta con nohup
-            ssh -o StrictHostKeyChecking=no ${STAGING_USER}@${STAGING_HOST} "\
-              (sudo systemctl daemon-reload || true) && \
-              (sudo systemctl restart ${SERVICE_NAME}.service || \
-               (nohup java -jar ${STAGING_DIR}/${SERVICE_NAME}.jar >/var/log/${SERVICE_NAME}.log 2>&1 &))"
+            # Crear carpeta destino
+            ssh -p ${STAGING_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              ${STAGING_USER}@${STAGING_HOST} "mkdir -p ${STAGING_DIR}"
+
+            # Copiar artefacto
+            scp -P ${STAGING_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              "$JAR" ${STAGING_USER}@${STAGING_HOST}:${STAGING_DIR}/${SERVICE_NAME}.jar
+
+            # Arrancar app (sin systemd; con nohup) en 8080 dentro del host
+            ssh -p ${STAGING_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              ${STAGING_USER}@${STAGING_HOST} "\
+                pkill -f '${STAGING_DIR}/${SERVICE_NAME}.jar' || true; \
+                nohup java -jar ${STAGING_DIR}/${SERVICE_NAME}.jar --server.port=8080 \
+                  > ${STAGING_DIR}/${SERVICE_NAME}.log 2>&1 & \
+                sleep 2; \
+                pgrep -fl java || true"
           '''
         }
       }
@@ -95,17 +104,24 @@ pipeline {
         }
       }
       steps {
-        sh '''
-          set -euxo pipefail
-          for i in $(seq 1 30); do
-            OUT=$(curl -fsS "http://${STAGING_HOST}:8080${HEALTH_PATH}" || true)
-            echo "$OUT"
-            echo "$OUT" | grep -Eqi 'UP|200|ok' && exit 0
-            sleep 2
-          done
-          echo "Health check FAILED"
-          exit 1
-        '''
+        // Validamos DESDE el host remoto (la app escucha en 8080 dentro)
+        sshagent(credentials: [env.SSH_CRED_ID]) {
+          sh '''
+            set -euxo pipefail
+            ssh -p ${STAGING_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              ${STAGING_USER}@${STAGING_HOST} '\
+                for i in $(seq 1 30); do
+                  OUT=$(curl -fsS http://localhost:8080'${HEALTH_PATH}' || true)
+                  echo "$OUT"
+                  echo "$OUT" | grep -Eqi "UP|200|ok|OK" && exit 0
+                  sleep 2
+                done
+                echo "Health check FAILED"; \
+                echo "---- Últimas líneas del log ----"; \
+                tail -n 200 '${STAGING_DIR}'/'${SERVICE_NAME}'.log; \
+                exit 1'
+          '''
+        }
       }
     }
   }
