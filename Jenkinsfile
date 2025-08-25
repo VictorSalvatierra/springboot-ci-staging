@@ -2,7 +2,6 @@ pipeline {
   agent any
 
   tools {
-    jdk 'jdk17'          // Manage Jenkins → Tools
     maven 'maven3'       // Manage Jenkins → Tools
   }
 
