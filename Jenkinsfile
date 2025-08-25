@@ -1,46 +1,120 @@
 pipeline {
-    agent any
-    environment {
-        STAGING_SERVER = 'user@your-staging-server'
-        ARTIFACT_NAME = 'demo-0.0.1-SNAPSHOT.jar'
+  agent any
+
+  tools {
+    jdk 'jdk17'          // Manage Jenkins → Tools
+    maven 'maven3'       // Manage Jenkins → Tools
+  }
+
+  options {
+    timestamps()
+    ansiColor('xterm')
+    buildDiscarder(logRotator(numToKeepStr: '15'))
+  }
+
+  parameters {
+    booleanParam(name: 'DEPLOY', defaultValue: true, description: 'Desplegar a Staging y hacer health check')
+    string(name: 'STAGING_HOST', defaultValue: 'REEMPLAZA-CON-IP-O-DNS', description: 'Host/IP del Staging')
+    string(name: 'STAGING_USER', defaultValue: 'staging', description: 'Usuario SSH en Staging')
+  }
+
+  environment {
+    SSH_CRED_ID  = 'staging-ssh'    // Credencial SSH en Jenkins
+    STAGING_DIR  = '/opt/springapp'
+    SERVICE_NAME = 'springapp'
+    HEALTH_PATH  = '/health'
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm   // porque el job será "Pipeline from SCM"
+      }
     }
-    stages {
-        stage('Clone Repository') {
-            steps {
-                git 'https://github.com/your-org/your-springboot-repo.git'
-            }
+
+    stage('Build & Unit Tests') {
+      steps {
+        sh 'mvn -B -U -e -DskipTests=false clean test'
+      }
+      post {
+        always {
+          junit 'target/surefire-reports/*.xml'
         }
-        stage('Build') {
-            steps {
-                sh 'mvn clean package -DskipTests'
-            }
-        }
-        stage('Code Quality') {
-            steps {
-                sh 'mvn checkstyle:check'
-            }
-        }
-        stage('Test') {
-            steps {
-                sh 'mvn test'
-            }
-        }
-        stage('Code Coverage') {
-            steps {
-                sh 'mvn jacoco:report'
-            }
-        }
-        stage('Deploy to Staging') {
-            steps {
-                sh 'scp target/${ARTIFACT_NAME} $STAGING_SERVER:/home/your-user/staging/'
-                sh 'ssh $STAGING_SERVER "nohup java -jar /home/your-user/staging/${ARTIFACT_NAME} > /dev/null 2>&1 &"'
-            }
-        }
-        stage('Validate Deployment') {
-            steps {
-                sh 'sleep 10'
-                sh 'curl --fail http://your-staging-server:8080/health'
-            }
-        }
+      }
     }
+
+    stage('Code Quality (Checkstyle)') {
+      steps {
+        sh 'mvn -B checkstyle:check'
+      }
+    }
+
+    stage('Coverage (JaCoCo)') {
+      steps {
+        // verify ejecuta jacoco:check (falla si cobertura < mínimo configurado)
+        sh 'mvn -B verify jacoco:report jacoco:check'
+      }
+    }
+
+    stage('Package (.jar)') {
+      steps {
+        sh 'mvn -B -DskipTests package'
+      }
+    }
+
+    stage('Deploy to Staging (SSH)') {
+      when {
+        allOf {
+          branch 'main'
+          expression { return params.DEPLOY && params.STAGING_HOST?.trim() }
+        }
+      }
+      steps {
+        sshagent(credentials: [env.SSH_CRED_ID]) {
+          sh '''
+            set -euxo pipefail
+            JAR=$(ls target/*.jar | head -n 1)
+            ssh -o StrictHostKeyChecking=no ${STAGING_USER}@${STAGING_HOST} "mkdir -p ${STAGING_DIR}"
+            scp -o StrictHostKeyChecking=no "$JAR" ${STAGING_USER}@${STAGING_HOST}:${STAGING_DIR}/${SERVICE_NAME}.jar
+
+            # reinicia servicio si existe; si no, levanta con nohup
+            ssh -o StrictHostKeyChecking=no ${STAGING_USER}@${STAGING_HOST} "\
+              (sudo systemctl daemon-reload || true) && \
+              (sudo systemctl restart ${SERVICE_NAME}.service || \
+               (nohup java -jar ${STAGING_DIR}/${SERVICE_NAME}.jar >/var/log/${SERVICE_NAME}.log 2>&1 &))"
+          '''
+        }
+      }
+    }
+
+    stage('Validate Deployment (Health)') {
+      when {
+        allOf {
+          branch 'main'
+          expression { return params.DEPLOY && params.STAGING_HOST?.trim() }
+        }
+      }
+      steps {
+        sh '''
+          set -euxo pipefail
+          for i in $(seq 1 30); do
+            OUT=$(curl -fsS "http://${STAGING_HOST}:8080${HEALTH_PATH}" || true)
+            echo "$OUT"
+            echo "$OUT" | grep -Eqi 'UP|200|ok' && exit 0
+            sleep 2
+          done
+          echo "Health check FAILED"
+          exit 1
+        '''
+      }
+    }
+  }
+
+  post {
+    always {
+      archiveArtifacts artifacts: 'target/*.jar, target/site/jacoco/**/*, target/checkstyle-result.xml', allowEmptyArchive: true, fingerprint: true
+      junit 'target/surefire-reports/*.xml'
+    }
+    success { echo 'Pipeline OK.' }
+  }
 }
