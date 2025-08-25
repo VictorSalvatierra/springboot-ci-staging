@@ -50,8 +50,9 @@ pipeline {
 
     stage('Coverage (JaCoCo)') {
       steps {
-        // verify ejecuta jacoco:check (falla si cobertura < mínimo configurado)
-        sh 'mvn -B verify jacoco:report jacoco:check'
+        // 'verify' ejecuta jacoco:check con las reglas del POM
+        // (añadimos -DskipTests para no volver a correr tests)
+        sh 'mvn -B -DskipTests verify'
       }
     }
 
