@@ -12,7 +12,7 @@ pipeline {
   }
 
   parameters {
-    booleanParam(name: 'DEPLOY', defaultValue: true, description: 'Desplegar a Staging y hacer health check')
+    booleanParam(name: 'DEPLOY', defaultValue: false, description: 'Desplegar a Staging y hacer health check')
     string(name: 'STAGING_HOST', defaultValue: 'REEMPLAZA-CON-IP-O-DNS', description: 'Host/IP del Staging')
     string(name: 'STAGING_USER', defaultValue: 'staging', description: 'Usuario SSH en Staging')
   }
