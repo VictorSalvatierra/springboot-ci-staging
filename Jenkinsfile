@@ -37,7 +37,7 @@ pipeline {
       }
       post {
         always {
-          junit 'target/surefire-reports/*.xml'
+          junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: true
         }
       }
     }
@@ -112,7 +112,7 @@ pipeline {
   post {
     always {
       archiveArtifacts artifacts: 'target/*.jar, target/site/jacoco/**/*, target/checkstyle-result.xml', allowEmptyArchive: true, fingerprint: true
-      junit 'target/surefire-reports/*.xml'
+      junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: true
     }
     success { echo 'Pipeline OK.' }
   }
