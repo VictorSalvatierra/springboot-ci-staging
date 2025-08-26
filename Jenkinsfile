@@ -19,7 +19,7 @@ pipeline {
   }
 
   environment {
-    SSH_CRED_ID  = 'staging-ssh'
+    SSH_CRED_ID  = 'staging'            // <- debe coincidir con tu ID de credencial en Jenkins
     STAGING_DIR  = '/opt/springapp'
     SERVICE_NAME = 'springapp'
     HEALTH_PATH  = '/health'
@@ -62,19 +62,26 @@ pipeline {
           // 1) Crear dir y copiar jar
           sh '''
             set -eux
-            JAR=$(ls target/*.jar | head -n 1)
-            ssh -p ${STAGING_PORT} -o StrictHostKeyChecking=no ${STAGING_USER}@${STAGING_HOST} "mkdir -p '${STAGING_DIR}'"
-            scp -P ${STAGING_PORT} -o StrictHostKeyChecking=no "$JAR" ${STAGING_USER}@${STAGING_HOST}:"${STAGING_DIR}/${SERVICE_NAME}.jar"
+            JAR="$(ls -1 target/*-SNAPSHOT.jar 2>/dev/null || ls -1 target/*.jar | head -n 1)"
+            ssh -p "${STAGING_PORT}" -o StrictHostKeyChecking=no "${STAGING_USER}@${STAGING_HOST}" "mkdir -p '${STAGING_DIR}'"
+            scp -P "${STAGING_PORT}" -o StrictHostKeyChecking=no "${JAR}" "${STAGING_USER}@${STAGING_HOST}:${STAGING_DIR}/${SERVICE_NAME}.jar"
           '''
-          // 2) Reiniciar/arrancar proceso (expande rutas en local antes de ejecutar en remoto)
+          // 2) Reiniciar/arrancar proceso (solo del usuario remoto) y dejar log
           sh """
             set -eux
-            ssh -p ${STAGING_PORT} -o StrictHostKeyChecking=no ${STAGING_USER}@${STAGING_HOST} "
+            ssh -p "${STAGING_PORT}" -o StrictHostKeyChecking=no "${STAGING_USER}@${STAGING_HOST}" '
               set -e
-              pkill -f '${env.STAGING_DIR}/${env.SERVICE_NAME}.jar' || true
-              nohup java -jar '${env.STAGING_DIR}/${env.SERVICE_NAME}.jar' --server.port=8080 > '${env.STAGING_DIR}/${env.SERVICE_NAME}.log' 2>&1 &
-              sleep 3
-            "
+              # mata SOLO procesos del usuario actual (evita "Operation not permitted" sobre procesos de root)
+              if pgrep -u \\$(id -u) -f "${STAGING_DIR}/${SERVICE_NAME}.jar" >/dev/null 2>&1; then
+                pkill -u \\$(id -u) -f "${STAGING_DIR}/${SERVICE_NAME}.jar" || true
+                sleep 1
+              fi
+
+              # arranque robusto y en background con setsid, dejando log y pid
+              setsid java -jar "${STAGING_DIR}/${SERVICE_NAME}.jar" --server.port=${STAGING_HTTP_PORT} > "${STAGING_DIR}/${SERVICE_NAME}.log" 2>&1 < /dev/null &
+              echo \\$! > "${STAGING_DIR}/pid.txt"
+              sleep 2
+            '
           """
         }
       }
@@ -117,14 +124,14 @@ pipeline {
           sshagent(credentials: [env.SSH_CRED_ID]) {
             sh """
               set +e
-              ssh -p ${STAGING_PORT} -o StrictHostKeyChecking=no ${STAGING_USER}@${STAGING_HOST} "
-                echo '---- ${env.SERVICE_NAME}.jar process ----';
-                pgrep -fa '${env.STAGING_DIR}/${env.SERVICE_NAME}.jar' || true;
-                echo '---- dir listing ----';
-                ls -l '${env.STAGING_DIR}' || true;
-                echo '---- last app log ----';
-                tail -n 200 '${env.STAGING_DIR}/${env.SERVICE_NAME}.log' || true
-              "
+              ssh -p "${STAGING_PORT}" -o StrictHostKeyChecking=no "${STAGING_USER}@${STAGING_HOST}" '
+                echo "---- ${SERVICE_NAME}.jar process ----";
+                pgrep -fa "${STAGING_DIR}/${SERVICE_NAME}.jar" || true;
+                echo "---- dir listing ----";
+                ls -l "${STAGING_DIR}" || true;
+                echo "---- last app log ----";
+                tail -n 200 "${STAGING_DIR}/${SERVICE_NAME}.log" || true
+              '
             """
           }
         }
